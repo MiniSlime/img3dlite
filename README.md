@@ -58,6 +58,7 @@ npm run build
 - `main` または `master` への push、または手動実行（`workflow_dispatch`）で Pages へデプロイします。
 - リポジトリの `Settings > Secrets and variables > Actions` に `VITE_GEMINI_API_KEY` を登録してください。
   - 注意: `VITE_` 付き変数はフロントに埋め込まれるため、公開サイト上で実質的に秘匿できません。
+- GitHub Pages では `.env` は参照されません（Actions の build 時に Secret が必要です）。
 - 初回のみ `Settings > Pages` で Build and deployment の Source を `GitHub Actions` に設定してください。
 
 ## プロジェクト構成（主要）
