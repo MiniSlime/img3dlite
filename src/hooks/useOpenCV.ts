@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 let openCvLoadPromise: Promise<void> | null = null;
 const LOAD_TIMEOUT_MS = 30000;
 const OPENCV_SCRIPT_ID = "opencv-js-script";
-const OPENCV_SRC = "/opencv.js";
+const OPENCV_SRC = `${import.meta.env.BASE_URL}opencv.js`;
 
 type UseOpenCVResult = {
   isReady: boolean;
@@ -65,7 +65,7 @@ function ensureOpenCVLoaded(): Promise<void> {
       script.async = true;
       script.src = OPENCV_SRC;
       script.addEventListener("error", () => {
-        markError("OpenCV.js の読み込みに失敗しました。/public/opencv.js を確認してください。");
+        markError(`OpenCV.js の読み込みに失敗しました。${OPENCV_SRC} を確認してください。`);
       });
       script.addEventListener("load", () => {
         attachRuntimeHandler();
