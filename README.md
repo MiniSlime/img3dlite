@@ -53,6 +53,13 @@ npm run build
 - `npm run dev` で Vite 開発サーバーを起動します。
 - Gemini API はブラウザから直接呼び出します（サーバープロキシなし）。
 
+## GitHub Pages 公開
+- このリポジトリには `/.github/workflows/deploy-gh-pages.yml` を用意してあります。
+- `main` または `master` への push、または手動実行（`workflow_dispatch`）で Pages へデプロイします。
+- リポジトリの `Settings > Secrets and variables > Actions` に `VITE_GEMINI_API_KEY` を登録してください。
+  - 注意: `VITE_` 付き変数はフロントに埋め込まれるため、公開サイト上で実質的に秘匿できません。
+- 初回のみ `Settings > Pages` で Build and deployment の Source を `GitHub Actions` に設定してください。
+
 ## プロジェクト構成（主要）
 - `src/App.tsx`: 画面統合と処理フロー
 - `src/hooks/useOpenCV.ts`: OpenCV.js 読み込み
