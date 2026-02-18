@@ -14,11 +14,16 @@ import "./styles/app.css";
 type FilesByView = Record<ViewKey, File | null>;
 type UrlsByView = Record<ViewKey, string | null>;
 type ShapesByView = Record<ViewKey, THREE.Shape | null>;
+type BlobsByView = Record<ViewKey, Blob | null>;
 
 const initialFiles: FilesByView = { front: null, top: null, side: null };
 const initialUrls: UrlsByView = { front: null, top: null, side: null };
 const initialShapes: ShapesByView = { front: null, top: null, side: null };
+const initialGeminiImages: UrlsByView = { front: null, top: null, side: null };
+const initialTransparentImages: UrlsByView = { front: null, top: null, side: null };
+const initialGeminiBlobs: BlobsByView = { front: null, top: null, side: null };
 const MIN_EXTRUSION_DEPTH = 300;
+const orderedViews: ViewKey[] = ["front", "top", "side"];
 
 function getShapeMaxDimension(shape: THREE.Shape): number {
   const points = shape.getPoints().filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
@@ -56,7 +61,6 @@ function computeExtrusionDepth(shapes: ShapesByView): number {
   // Use sufficiently large depth to avoid truncation before CSG intersection.
   return Math.max(MIN_EXTRUSION_DEPTH, Math.ceil(maxDimension * 2.5));
 }
-const initialGeminiImages: Record<ViewKey, string | null> = { front: null, top: null, side: null };
 
 export default function App() {
   const { isReady: isOpenCVReady, error: openCVError } = useOpenCV();
@@ -64,18 +68,26 @@ export default function App() {
   const [files, setFiles] = useState<FilesByView>(initialFiles);
   const [imageUrls, setImageUrls] = useState<UrlsByView>(initialUrls);
   const [shapes, setShapes] = useState<ShapesByView>(initialShapes);
-  const [geminiImages, setGeminiImages] = useState<Record<ViewKey, string | null>>(initialGeminiImages);
+  const [geminiImages, setGeminiImages] = useState<UrlsByView>(initialGeminiImages);
+  const [transparentImages, setTransparentImages] = useState<UrlsByView>(initialTransparentImages);
+  const [geminiBlobs, setGeminiBlobs] = useState<BlobsByView>(initialGeminiBlobs);
   const [epsilonRatio, setEpsilonRatio] = useState(0.01);
+  const [exactTolerance, setExactTolerance] = useState(0);
+  const [nearTolerance, setNearTolerance] = useState(16);
   const [processing, setProcessing] = useState(false);
   const [phase, setPhase] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const imageUrlsRef = useRef<UrlsByView>(initialUrls);
   const extrusionDepth = useMemo(() => computeExtrusionDepth(shapes), [shapes]);
-  const geminiImageUrlsRef = useRef<Record<ViewKey, string | null>>(initialGeminiImages);
+  const geminiImageUrlsRef = useRef<UrlsByView>(initialGeminiImages);
+  const transparentImageUrlsRef = useRef<UrlsByView>(initialTransparentImages);
 
-  const canProcess = useMemo(() => {
+  const canRunGemini = useMemo(() => {
     return Boolean(isOpenCVReady && imageUrls.front && imageUrls.top && imageUrls.side);
   }, [isOpenCVReady, imageUrls.front, imageUrls.top, imageUrls.side]);
+  const canReprocessWithoutGemini = useMemo(() => {
+    return Boolean(isOpenCVReady && geminiBlobs.front && geminiBlobs.top && geminiBlobs.side);
+  }, [isOpenCVReady, geminiBlobs.front, geminiBlobs.top, geminiBlobs.side]);
 
   const onChangeFile = useCallback((view: ViewKey, file: File | null) => {
     setFiles((prev) => ({ ...prev, [view]: file }));
@@ -94,6 +106,13 @@ export default function App() {
       }
       return { ...prev, [view]: null };
     });
+    setTransparentImages((prev) => {
+      if (prev[view]) {
+        URL.revokeObjectURL(prev[view] as string);
+      }
+      return { ...prev, [view]: null };
+    });
+    setGeminiBlobs((prev) => ({ ...prev, [view]: null }));
     setPhase(null);
     setError(null);
   }, []);
@@ -107,11 +126,18 @@ export default function App() {
   }, [geminiImages]);
 
   useEffect(() => {
+    transparentImageUrlsRef.current = transparentImages;
+  }, [transparentImages]);
+
+  useEffect(() => {
     return () => {
       Object.values(imageUrlsRef.current).forEach((url) => {
         if (url) URL.revokeObjectURL(url);
       });
       Object.values(geminiImageUrlsRef.current).forEach((url) => {
+        if (url) URL.revokeObjectURL(url);
+      });
+      Object.values(transparentImageUrlsRef.current).forEach((url) => {
         if (url) URL.revokeObjectURL(url);
       });
     };
@@ -126,6 +152,59 @@ export default function App() {
     });
   }, []);
 
+  const clearTransparentImages = useCallback(() => {
+    setTransparentImages((prev) => {
+      Object.values(prev).forEach((url) => {
+        if (url) URL.revokeObjectURL(url);
+      });
+      return { ...initialTransparentImages };
+    });
+  }, []);
+
+  const processFromGeminiBlobs = useCallback(
+    async (cachedBlobs: BlobsByView) => {
+      const nextTransparentUrls: UrlsByView = { ...initialTransparentImages };
+      const nextShapes: ShapesByView = { ...initialShapes };
+
+      try {
+        for (const view of orderedViews) {
+          const blueBgBlob = cachedBlobs[view];
+          if (!blueBgBlob) {
+            throw new Error(`[${view}] Gemini画像キャッシュがありません。`);
+          }
+
+          setPhase(`${view.toUpperCase()}: 青背景を透明化中...`);
+          const transparentBlob = await convertBlueToTransparent(blueBgBlob, {
+            exactTolerance,
+            nearTolerance,
+          });
+          const transparentUrl = URL.createObjectURL(transparentBlob);
+          nextTransparentUrls[view] = transparentUrl;
+
+          setPhase(`${view.toUpperCase()}: 輪郭を抽出中...`);
+          const processed = await imageToShapeWithPreview(transparentUrl, {
+            epsilonRatio,
+            blurKernelSize: 5,
+            morphologyKernelSize: 5,
+            morphologyIterations: 1,
+            keepLargestContour: true,
+          });
+          nextShapes[view] = processed.shape;
+        }
+      } catch (err) {
+        Object.values(nextTransparentUrls).forEach((url) => {
+          if (url) URL.revokeObjectURL(url);
+        });
+        throw err;
+      }
+
+      clearTransparentImages();
+      setTransparentImages(nextTransparentUrls);
+      setShapes(nextShapes);
+    },
+    [clearTransparentImages, epsilonRatio, exactTolerance, nearTolerance],
+  );
+
   const runModeling = useCallback(async () => {
     if (!imageUrls.front || !imageUrls.top || !imageUrls.side) {
       return;
@@ -135,58 +214,32 @@ export default function App() {
     setError(null);
     setPhase("Gemini前処理を開始...");
     clearGeminiImages();
+    clearTransparentImages();
+    setGeminiBlobs(initialGeminiBlobs);
+    setShapes(initialShapes);
 
-    const processOneView = async (view: ViewKey, url: string) => {
-      let geminiPreviewUrl: string | null = null;
-      try {
+    try {
+      const nextBlobs: BlobsByView = { ...initialGeminiBlobs };
+      const nextGeminiUrls: UrlsByView = { ...initialGeminiImages };
+
+      for (const view of orderedViews) {
+        const sourceUrl = imageUrls[view];
+        if (!sourceUrl) {
+          throw new Error(`[${view}] 元画像URLがありません。`);
+        }
+
         setPhase(`${view.toUpperCase()}: 画像をGeminiに送信中...`);
-        const sourceBlob = await fetch(url).then((res) => res.blob());
+        const sourceBlob = await fetch(sourceUrl).then((res) => res.blob());
         const sourceType = sourceBlob.type || "image/png";
         const sourceFile = new File([sourceBlob], `${view}.png`, { type: sourceType });
         const blueBgBlob = await requestBlueBackgroundImage(sourceFile);
-        geminiPreviewUrl = URL.createObjectURL(blueBgBlob);
-
-        setPhase(`${view.toUpperCase()}: 青背景を透明化中...`);
-        const transparentBlob = await convertBlueToTransparent(blueBgBlob);
-        const transparentUrl = URL.createObjectURL(transparentBlob);
-
-        try {
-          setPhase(`${view.toUpperCase()}: 輪郭を抽出中...`);
-          const processed = await imageToShapeWithPreview(transparentUrl, {
-            epsilonRatio,
-            blurKernelSize: 5,
-            morphologyKernelSize: 5,
-            morphologyIterations: 1,
-            keepLargestContour: true,
-          });
-          return { processed, geminiPreviewUrl };
-        } finally {
-          URL.revokeObjectURL(transparentUrl);
-        }
-      } catch (err) {
-        if (geminiPreviewUrl) {
-          URL.revokeObjectURL(geminiPreviewUrl);
-        }
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`[${view}] ${message}`);
+        nextBlobs[view] = blueBgBlob;
+        nextGeminiUrls[view] = URL.createObjectURL(blueBgBlob);
       }
-    };
 
-    try {
-      const front = await processOneView("front", imageUrls.front);
-      const top = await processOneView("top", imageUrls.top);
-      const side = await processOneView("side", imageUrls.side);
-
-      setShapes({
-        front: front.processed.shape,
-        top: top.processed.shape,
-        side: side.processed.shape,
-      });
-      setGeminiImages({
-        front: front.geminiPreviewUrl,
-        top: top.geminiPreviewUrl,
-        side: side.geminiPreviewUrl,
-      });
+      setGeminiBlobs(nextBlobs);
+      setGeminiImages(nextGeminiUrls);
+      await processFromGeminiBlobs(nextBlobs);
     } catch (err) {
       const message = err instanceof Error ? err.message : "画像処理中に不明なエラーが発生しました。";
       setError(message);
@@ -195,7 +248,29 @@ export default function App() {
       setPhase(null);
       setProcessing(false);
     }
-  }, [imageUrls.front, imageUrls.side, imageUrls.top, epsilonRatio, clearGeminiImages]);
+  }, [clearGeminiImages, clearTransparentImages, imageUrls, processFromGeminiBlobs]);
+
+  const rerunFromCachedGemini = useCallback(async () => {
+    if (!geminiBlobs.front || !geminiBlobs.top || !geminiBlobs.side) {
+      return;
+    }
+
+    setProcessing(true);
+    setError(null);
+    setPhase("Gemini再呼び出しなしで再処理中...");
+    setShapes(initialShapes);
+
+    try {
+      await processFromGeminiBlobs(geminiBlobs);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "再処理中に不明なエラーが発生しました。";
+      setError(message);
+      setShapes(initialShapes);
+    } finally {
+      setPhase(null);
+      setProcessing(false);
+    }
+  }, [geminiBlobs, processFromGeminiBlobs]);
 
   const resultGeometry = useMemo(() => {
     try {
@@ -215,7 +290,7 @@ export default function App() {
     <main className="app-root">
       <header className="app-header">
         <h1>Deterministic 3D Modeling Prototype (OEI)</h1>
-        <p>OpenCV で輪郭抽出し、Three.js + CSG で 3 視点の交差体を生成します。</p>
+        <p>Gemini + OpenCV で輪郭抽出し、Three.js + CSG で 3 視点の交差体を生成します。</p>
       </header>
 
       <div className="layout">
@@ -223,7 +298,11 @@ export default function App() {
           <UploadPanel files={files} onChangeFile={onChangeFile} />
           <ParameterControls
             epsilonRatio={epsilonRatio}
+            exactTolerance={exactTolerance}
+            nearTolerance={nearTolerance}
             onEpsilonRatioChange={setEpsilonRatio}
+            onExactToleranceChange={setExactTolerance}
+            onNearToleranceChange={setNearTolerance}
           />
 
           <section className="panel">
@@ -235,11 +314,20 @@ export default function App() {
             {phase && <p>{phase}</p>}
             {openCVError && <p className="error">{openCVError}</p>}
             {error && <p className="error">{error}</p>}
-            <button type="button" disabled={!canProcess || processing} onClick={runModeling}>
-              {processing ? "Processing..." : "Generate 3D Mesh"}
-            </button>
+            <div className="button-row">
+              <button type="button" disabled={!canRunGemini || processing} onClick={runModeling}>
+                {processing ? "Processing..." : "Generate via Gemini"}
+              </button>
+              <button
+                type="button"
+                disabled={!canReprocessWithoutGemini || processing}
+                onClick={rerunFromCachedGemini}
+              >
+                {processing ? "Processing..." : "Rebuild 3D (No Gemini)"}
+              </button>
+            </div>
           </section>
-          <GeminiPreviewPanel images={geminiImages} />
+          <GeminiPreviewPanel geminiImages={geminiImages} transparentImages={transparentImages} />
           <ExportPanel geometry={resultGeometry} />
         </aside>
 

@@ -153,6 +153,22 @@ button:disabled {
   color: #9fb0dc;
 }
 
+.gemini-preview-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.gemini-preview-slot {
+  display: grid;
+  gap: 4px;
+}
+
+.gemini-preview-slot small {
+  color: #9fb0dc;
+  font-size: 0.72rem;
+}
+
 .gemini-preview-card img {
   width: 100%;
   height: 96px;
